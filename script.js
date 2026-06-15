@@ -125,10 +125,24 @@ function generateInitialState() {
         negotiations: [],
         history,
         lastUndoableId: null,
+        preschedule: {
+            abnormalMerchants: [],
+            unavailableStalls: [],
+            relocationPlan: [],
+            confirmedPlan: null,
+            lastUpdated: null
+        },
         createdAt: now,
         updatedAt: now
     };
 }
+
+const ABNORMAL_TYPES = {
+    late: { label: '晚到', icon: '⏰', color: '#f59e0b', needRelocation: true },
+    leave: { label: '请假', icon: '📝', color: '#8b5cf6', needRelocation: true },
+    blackout: { label: '临时停电', icon: '⚡', color: '#ef4444', needRelocation: true },
+    closed: { label: '暂时不开摊', icon: '🚫', color: '#64748b', needRelocation: false }
+};
 
 function generateStallNote(category, popularity, power) {
     const notes = {
@@ -1419,12 +1433,1022 @@ function startUndoTimerTicker() {
     }, 1000);
 }
 
+let editingAbnormalId = null;
+let adjustingPlanId = null;
+
+function ensurePreschedule() {
+    if (!state.preschedule) {
+        state.preschedule = {
+            abnormalMerchants: [],
+            unavailableStalls: [],
+            relocationPlan: [],
+            confirmedPlan: null,
+            lastUpdated: null
+        };
+    }
+    if (!state.preschedule.abnormalMerchants) state.preschedule.abnormalMerchants = [];
+    if (!state.preschedule.unavailableStalls) state.preschedule.unavailableStalls = [];
+    if (!state.preschedule.relocationPlan) state.preschedule.relocationPlan = [];
+}
+
+function savePreschedule() {
+    ensurePreschedule();
+    state.preschedule.lastUpdated = Date.now();
+    saveState();
+}
+
+function openPrescheduleModal() {
+    ensurePreschedule();
+    renderPrescheduleAll();
+    openModal('prescheduleModal');
+}
+
+function renderPrescheduleAll() {
+    renderAbnormalList();
+    renderUnavailableList();
+    renderRelocationPlan();
+    renderConfirmedPlan();
+}
+
+function renderAbnormalList() {
+    const list = $('abnormalList');
+    const count = $('abnormalCount');
+    const items = state.preschedule.abnormalMerchants;
+
+    count.textContent = items.length;
+
+    if (items.length === 0) {
+        list.innerHTML = `<div class="panel-hint" style="margin-bottom:0;">暂无异常商户，点击上方"添加异常"开始录入</div>`;
+        return;
+    }
+
+    list.innerHTML = items.map(item => {
+        const merchant = getMerchant(item.merchantId);
+        const stall = merchant ? getMerchantStall(merchant.id) : null;
+        const type = ABNORMAL_TYPES[item.type] || { label: '未知', icon: '❓', color: '#64748b' };
+        return `
+            <div class="abnormal-item" data-id="${item.id}">
+                <div class="abn-header">
+                    <span class="abn-merchant">${type.icon} ${merchant ? merchant.name : '未知商户'}</span>
+                    <span class="abn-type-tag" style="background:${type.color}">${type.label}</span>
+                </div>
+                <div class="abn-stall">📍 当前摊位: ${stall ? stall.id + ' (' + stall.zone + ')' : '无'}</div>
+                ${item.remark ? `<div class="abn-remark">📝 ${item.remark}</div>` : ''}
+                <div class="item-actions">
+                    <button class="item-btn edit" onclick="editAbnormal('${item.id}')">✏️ 编辑</button>
+                    <button class="item-btn danger" onclick="removeAbnormal('${item.id}')">🗑️ 删除</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function openAddAbnormalModal(editId = null) {
+    editingAbnormalId = editId;
+    const title = $('addAbnormalTitle');
+    const merchantSel = $('abnMerchant');
+    const typeSel = $('abnType');
+    const remarkEl = $('abnRemark');
+
+    const existingIds = new Set(
+        state.preschedule.abnormalMerchants
+            .filter(a => a.id !== editId)
+            .map(a => a.merchantId)
+    );
+
+    let options = state.merchants
+        .filter(m => !existingIds.has(m.id))
+        .map(m => `<option value="${m.id}">${m.name} (${m.currentStallId})</option>`)
+        .join('');
+
+    if (!options) {
+        options = '<option value="">所有商户都已标记异常</option>';
+    }
+    merchantSel.innerHTML = options;
+
+    if (editId) {
+        title.textContent = '✏️ 编辑异常商户';
+        const item = state.preschedule.abnormalMerchants.find(a => a.id === editId);
+        if (item) {
+            if (!merchantSel.querySelector(`option[value="${item.merchantId}"]`)) {
+                const m = getMerchant(item.merchantId);
+                merchantSel.innerHTML = `<option value="${item.merchantId}">${m ? m.name : ''} (${m ? m.currentStallId : ''})</option>` + merchantSel.innerHTML;
+            }
+            merchantSel.value = item.merchantId;
+            typeSel.value = item.type;
+            remarkEl.value = item.remark || '';
+        }
+    } else {
+        title.textContent = '➕ 添加异常商户';
+        typeSel.value = 'late';
+        remarkEl.value = '';
+    }
+
+    openModal('addAbnormalModal');
+}
+
+function editAbnormal(id) {
+    if (state.preschedule.confirmedPlan) {
+        showToast('已确认的预排方案不可修改，请先取消确认', 'warning');
+        return;
+    }
+    openAddAbnormalModal(id);
+}
+
+function removeAbnormal(id) {
+    if (state.preschedule.confirmedPlan) {
+        showToast('已确认的预排方案不可修改，请先取消确认', 'warning');
+        return;
+    }
+    showConfirm('删除确认', '确定要删除这条异常记录吗？', () => {
+        state.preschedule.abnormalMerchants = state.preschedule.abnormalMerchants.filter(a => a.id !== id);
+        state.preschedule.relocationPlan = state.preschedule.relocationPlan.filter(p => p.abnormalId !== id);
+        savePreschedule();
+        renderPrescheduleAll();
+        showToast('异常记录已删除', 'info');
+    });
+}
+
+function submitAbnormal() {
+    const merchantId = $('abnMerchant').value;
+    const type = $('abnType').value;
+    const remark = $('abnRemark').value.trim();
+
+    if (!merchantId) {
+        showToast('请选择商户', 'error');
+        return;
+    }
+
+    if (editingAbnormalId) {
+        const item = state.preschedule.abnormalMerchants.find(a => a.id === editingAbnormalId);
+        if (item) {
+            item.merchantId = merchantId;
+            item.type = type;
+            item.remark = remark;
+            item.updatedAt = Date.now();
+        }
+        showToast('异常记录已更新', 'success');
+    } else {
+        state.preschedule.abnormalMerchants.push({
+            id: 'ABN' + Date.now(),
+            merchantId,
+            type,
+            remark,
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+        });
+        showToast('异常商户已添加', 'success');
+    }
+
+    state.preschedule.relocationPlan = [];
+    state.preschedule.confirmedPlan = null;
+    editingAbnormalId = null;
+    savePreschedule();
+    closeModal('addAbnormalModal');
+    renderPrescheduleAll();
+}
+
+function renderUnavailableList() {
+    const list = $('unavailableList');
+    const count = $('unavailableCount');
+    const items = state.preschedule.unavailableStalls;
+
+    count.textContent = items.length;
+
+    if (items.length === 0) {
+        list.innerHTML = `<div class="panel-hint" style="margin-bottom:0;">暂无不可用摊位，点击上方"标记摊位"开始标记</div>`;
+        return;
+    }
+
+    list.innerHTML = items.map(item => {
+        const stall = getStall(item.stallId);
+        const merchant = stall ? getMerchant(stall.merchantId) : null;
+        return `
+            <div class="unavailable-item" data-id="${item.id}">
+                <div class="unav-header">
+                    <span class="unav-stall">🚧 ${item.stallId}</span>
+                    <span class="unav-reason-tag">${item.reason}</span>
+                </div>
+                <div class="unav-info">
+                    ${stall ? '📍 ' + stall.zone : ''}
+                    ${merchant ? ' | 🏪 原商户: ' + merchant.name : ''}
+                </div>
+                ${item.remark ? `<div class="unav-remark">📝 ${item.remark}</div>` : ''}
+                <div class="item-actions">
+                    <button class="item-btn danger" onclick="removeUnavailable('${item.id}')">🗑️ 取消标记</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function openAddUnavailableModal() {
+    const stallSel = $('unavStall');
+    const reasonSel = $('unavReason');
+    const remarkEl = $('unavRemark');
+
+    const existingIds = new Set(state.preschedule.unavailableStalls.map(u => u.stallId));
+    let options = state.stalls
+        .filter(s => !existingIds.has(s.id))
+        .map(s => {
+            const m = getMerchant(s.merchantId);
+            return `<option value="${s.id}">${s.id} (${s.zone})${m ? ' - ' + m.name : ' - 空闲'}</option>`;
+        })
+        .join('');
+
+    if (!options) {
+        options = '<option value="">所有摊位都已标记不可用</option>';
+    }
+    stallSel.innerHTML = options;
+    reasonSel.value = '设施维修';
+    remarkEl.value = '';
+
+    openModal('addUnavailableModal');
+}
+
+function removeUnavailable(id) {
+    if (state.preschedule.confirmedPlan) {
+        showToast('已确认的预排方案不可修改，请先取消确认', 'warning');
+        return;
+    }
+    showConfirm('取消标记', '确定要取消该摊位的不可用标记吗？', () => {
+        state.preschedule.unavailableStalls = state.preschedule.unavailableStalls.filter(u => u.id !== id);
+        state.preschedule.relocationPlan = [];
+        state.preschedule.confirmedPlan = null;
+        savePreschedule();
+        renderPrescheduleAll();
+        showToast('已取消摊位不可用标记', 'info');
+    });
+}
+
+function submitUnavailable() {
+    const stallId = $('unavStall').value;
+    const reason = $('unavReason').value;
+    const remark = $('unavRemark').value.trim();
+
+    if (!stallId) {
+        showToast('请选择摊位', 'error');
+        return;
+    }
+
+    state.preschedule.unavailableStalls.push({
+        id: 'UNAV' + Date.now(),
+        stallId,
+        reason,
+        remark,
+        createdAt: Date.now()
+    });
+
+    state.preschedule.relocationPlan = [];
+    state.preschedule.confirmedPlan = null;
+    savePreschedule();
+    closeModal('addUnavailableModal');
+    renderPrescheduleAll();
+    showToast('摊位已标记为不可用', 'success');
+}
+
+function getMerchantsNeedRelocation() {
+    return state.preschedule.abnormalMerchants.filter(a => {
+        const type = ABNORMAL_TYPES[a.type];
+        return type && type.needRelocation;
+    });
+}
+
+function getStallsNeedRelocation() {
+    const stallIds = new Set();
+    state.preschedule.unavailableStalls.forEach(u => {
+        const stall = getStall(u.stallId);
+        if (stall && stall.merchantId) {
+            stallIds.add(stall.id);
+        }
+    });
+    state.preschedule.abnormalMerchants.forEach(a => {
+        const type = ABNORMAL_TYPES[a.type];
+        if (type && !type.needRelocation) return;
+        const merchant = getMerchant(a.merchantId);
+        if (merchant && merchant.currentStallId) {
+            stallIds.add(merchant.currentStallId);
+        }
+    });
+    return Array.from(stallIds);
+}
+
+function getAvailableStallsForPlan(excludeStallIds = new Set(), usedStallIds = new Set()) {
+    const unavailableIds = new Set(state.preschedule.unavailableStalls.map(u => u.stallId));
+    const abnNeedRelocationIds = new Set(
+        getMerchantsNeedRelocation().map(a => {
+            const m = getMerchant(a.merchantId);
+            return m ? m.currentStallId : null;
+        }).filter(Boolean)
+    );
+    const closedIds = new Set(
+        state.preschedule.abnormalMerchants
+            .filter(a => a.type === 'closed')
+            .map(a => {
+                const m = getMerchant(a.merchantId);
+                return m ? m.currentStallId : null;
+            }).filter(Boolean)
+    );
+
+    return state.stalls.filter(s => {
+        if (excludeStallIds.has(s.id)) return false;
+        if (usedStallIds.has(s.id)) return false;
+        if (unavailableIds.has(s.id)) return false;
+        if (abnNeedRelocationIds.has(s.id)) return false;
+        if (closedIds.has(s.id)) return false;
+        return true;
+    });
+}
+
+function scoreStallForMerchant(stall, merchant, fromStall) {
+    let score = 0;
+    const reasons = [];
+
+    if (!stall.merchantId) {
+        score += 50;
+        reasons.push('空摊位无需换位');
+    }
+
+    if (fromStall && stall.zone === fromStall.zone) {
+        score += 25;
+        reasons.push('同区域不跨区');
+    }
+
+    if (stall.category === merchant.category) {
+        score += 15;
+        reasons.push('品类匹配环境');
+    }
+
+    if (fromStall && stall.popularity >= fromStall.popularity) {
+        score += 10;
+        reasons.push(`人气不低于原摊位(${getStars(stall.popularity)}≥${getStars(fromStall.popularity)})`);
+    } else if (fromStall) {
+        score += 5;
+        reasons.push(`人气略低于原摊位(${getStars(stall.popularity)}<${getStars(fromStall.popularity)})`);
+    }
+
+    if (stall.power === merchant.power) {
+        score += 10;
+        reasons.push(`${getPowerLabel(merchant.power)}需求匹配`);
+    }
+
+    return { score, reasons };
+}
+
+function generateRelocationPlan() {
+    ensurePreschedule();
+
+    const needRelocationMerchants = getMerchantsNeedRelocation();
+    const unavailableStalls = state.preschedule.unavailableStalls;
+    const stallToMerchantMap = {};
+    unavailableStalls.forEach(u => {
+        const stall = getStall(u.stallId);
+        if (stall && stall.merchantId) {
+            stallToMerchantMap[u.stallId] = {
+                merchantId: stall.merchantId,
+                reason: `摊位${stall.id}不可用(${u.reason})`
+            };
+        }
+    });
+
+    const tasks = [];
+    needRelocationMerchants.forEach(a => {
+        const merchant = getMerchant(a.merchantId);
+        if (!merchant) return;
+        tasks.push({
+            abnormalId: a.id,
+            merchantId: a.merchantId,
+            fromStallId: merchant.currentStallId,
+            abnormalType: a.type,
+            triggerReason: ABNORMAL_TYPES[a.type].label + (a.remark ? `：${a.remark}` : ''),
+            priority: a.type === 'blackout' ? 3 : a.type === 'late' ? 2 : 1
+        });
+    });
+    Object.entries(stallToMerchantMap).forEach(([stallId, info]) => {
+        const alreadyIn = tasks.some(t => t.merchantId === info.merchantId);
+        if (!alreadyIn) {
+            tasks.push({
+                abnormalId: 'STALL_' + stallId,
+                merchantId: info.merchantId,
+                fromStallId: stallId,
+                abnormalType: 'stall_unavailable',
+                triggerReason: info.reason,
+                priority: 3
+            });
+        }
+    });
+
+    if (tasks.length === 0) {
+        showToast('没有需要安置的商户（晚到/请假/临时停电，或摊位不可用导致商户需转移）', 'warning');
+        state.preschedule.relocationPlan = [];
+        savePreschedule();
+        renderPrescheduleAll();
+        return;
+    }
+
+    tasks.sort((a, b) => b.priority - a.priority);
+
+    const plan = [];
+    const usedStallIds = new Set();
+    const fromStallIds = new Set(tasks.map(t => t.fromStallId));
+    const assignedMerchants = new Set();
+
+    tasks.forEach(task => {
+        const merchant = getMerchant(task.merchantId);
+        const fromStall = getStall(task.fromStallId);
+        if (!merchant || !fromStall) return;
+        if (assignedMerchants.has(merchant.id)) return;
+
+        const candidates = getAvailableStallsForPlan(fromStallIds, usedStallIds);
+        
+        const unavailableStallIdsSet = new Set(state.preschedule.unavailableStalls.map(u => u.stallId));
+        const fromStallIsBad = unavailableStallIdsSet.has(fromStall.id) ||
+            state.preschedule.abnormalMerchants.some(a => {
+                const m = getMerchant(a.merchantId);
+                return m && m.currentStallId === fromStall.id;
+            });
+        
+        const filteredCandidates = candidates.filter(stall => {
+            if (!stall.merchantId) return true;
+            return !fromStallIsBad;
+        });
+        
+        const finalCandidates = filteredCandidates.length > 0 ? filteredCandidates : candidates;
+        
+        if (finalCandidates.length === 0) {
+            plan.push({
+                id: 'PLAN' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+                abnormalId: task.abnormalId,
+                merchantId: merchant.id,
+                merchantName: merchant.name,
+                fromStallId: fromStall.id,
+                fromStallZone: fromStall.zone,
+                toStallId: null,
+                toStallZone: null,
+                toMerchantId: null,
+                toMerchantName: null,
+                reason: '❌ 暂无可安置摊位，请手动标记更多摊位可用或减少异常商户',
+                reasons: [],
+                score: 0,
+                triggerReason: task.triggerReason,
+                abnormalType: task.abnormalType,
+                isManual: false,
+                noStall: true
+            });
+            return;
+        }
+
+        const scored = finalCandidates.map(stall => {
+            const { score, reasons } = scoreStallForMerchant(stall, merchant, fromStall);
+            return { stall, score, reasons };
+        });
+        scored.sort((a, b) => b.score - a.score);
+
+        const best = scored[0];
+        const toMerchant = best.stall.merchantId ? getMerchant(best.stall.merchantId) : null;
+
+        let finalScore = best.score;
+        let finalReasons = [...best.reasons];
+        let finalToStall = best.stall;
+
+        if (toMerchant && !toMerchant.currentStallId) {
+        }
+
+        usedStallIds.add(finalToStall.id);
+        assignedMerchants.add(merchant.id);
+
+        const reasonText = finalReasons.length > 0 
+            ? '推荐原因：' + finalReasons.join('；')
+            : '综合评分最高';
+
+        plan.push({
+            id: 'PLAN' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+            abnormalId: task.abnormalId,
+            merchantId: merchant.id,
+            merchantName: merchant.name,
+            fromStallId: fromStall.id,
+            fromStallZone: fromStall.zone,
+            toStallId: finalToStall.id,
+            toStallZone: finalToStall.zone,
+            toMerchantId: toMerchant ? toMerchant.id : null,
+            toMerchantName: toMerchant ? toMerchant.name : null,
+            reason: reasonText,
+            reasons: finalReasons,
+            score: finalScore,
+            maxScore: 110,
+            triggerReason: task.triggerReason,
+            abnormalType: task.abnormalType,
+            isManual: false,
+            noStall: false
+        });
+    });
+
+    state.preschedule.relocationPlan = plan;
+    state.preschedule.confirmedPlan = null;
+    savePreschedule();
+    renderPrescheduleAll();
+    showToast(`已生成 ${plan.length} 条安置方案`, 'success');
+}
+
+function renderRelocationPlan() {
+    const list = $('planList');
+    const hint = $('planHint');
+    const count = $('planCount');
+    const plan = state.preschedule.relocationPlan;
+
+    count.textContent = plan.length;
+
+    const needRelocationCount = getMerchantsNeedRelocation().length;
+    const unavWithMerchant = state.preschedule.unavailableStalls.filter(u => {
+        const s = getStall(u.stallId);
+        return s && s.merchantId;
+    }).length;
+    const totalNeed = needRelocationCount + unavWithMerchant;
+
+    if (plan.length === 0) {
+        if (totalNeed === 0) {
+            hint.style.display = '';
+            hint.textContent = '暂无需要安置的商户。请先在左侧录入异常商户（晚到/请假/临时停电）或标记有商户的不可用摊位。';
+        } else {
+            hint.style.display = '';
+            hint.textContent = `检测到 ${totalNeed} 位需要安置的商户，点击"🧠 智能生成方案"获取推荐`;
+        }
+        list.innerHTML = '';
+        return;
+    }
+
+    hint.style.display = 'none';
+
+    const noStallItems = plan.filter(p => p.noStall);
+    let noStallHtml = '';
+    if (noStallItems.length > 0) {
+        noStallHtml = `
+            <div class="plan-empty-merchants">
+                <div class="plan-empty-merchants-title">⚠️ 以下商户暂无可安置摊位</div>
+                <div class="plan-empty-merchants-list">
+                    ${noStallItems.map(p => `• ${p.merchantName} (${p.fromStallId})`).join('<br>')}
+                </div>
+            </div>
+        `;
+    }
+
+    const validPlan = plan.filter(p => !p.noStall);
+    let confirmBar = '';
+    if (validPlan.length > 0 && !state.preschedule.confirmedPlan) {
+        confirmBar = `
+            <div class="confirm-plan-bar">
+                <span class="confirm-plan-info">共 ${validPlan.length} 条有效方案，请逐一检查后确认整组方案</span>
+                <button class="confirm-plan-btn" onclick="confirmWholePlan()">✅ 确认全部方案</button>
+            </div>
+        `;
+    }
+
+    list.innerHTML = noStallHtml + confirmBar + validPlan.map(p => {
+        const type = ABNORMAL_TYPES[p.abnormalType];
+        const typeLabel = type ? type.label : '摊位不可用';
+        const typeColor = type ? type.color : '#ef4444';
+        const toMerchantText = p.toMerchantName ? `(原商户: ${p.toMerchantName}需换出)` : '(空摊位)';
+        return `
+            <div class="plan-item" data-id="${p.id}">
+                <div class="plan-header">
+                    <div>
+                        <div class="plan-merchant">🏪 ${p.merchantName}</div>
+                        <span class="plan-abn-tag" style="background:${typeColor}">${typeLabel}</span>
+                    </div>
+                    ${p.score ? `<div style="text-align:right;">
+                        <div style="font-size:18px;font-weight:700;color:#6366f1;">${p.score}</div>
+                        <div class="plan-score">满分 ${p.maxScore || 110}</div>
+                    </div>` : ''}
+                </div>
+                <div style="font-size:11px;color:#64748b;margin-bottom:8px;">触发原因：${p.triggerReason}</div>
+                <div class="plan-route">
+                    <span class="plan-from-stall">${p.fromStallId}</span>
+                    <span class="plan-arrow">→</span>
+                    <span class="plan-to-stall">${p.toStallId || '暂无'}</span>
+                </div>
+                <div style="font-size:11px;color:#64748b;text-align:center;margin-bottom:8px;">
+                    ${p.fromStallZone} → ${p.toStallZone || '-'} ${toMerchantText}
+                </div>
+                <div class="plan-reason">💡 ${p.reason}</div>
+                <div class="plan-actions">
+                    <button class="plan-btn adjust" onclick="openAdjustPlan('${p.id}')">🔧 调整摊位</button>
+                    <button class="plan-btn remove" onclick="removePlanItem('${p.id}')">❌ 删除此条</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function openAdjustPlan(planId) {
+    adjustingPlanId = planId;
+    const plan = state.preschedule.relocationPlan.find(p => p.id === planId);
+    if (!plan) return;
+    if (state.preschedule.confirmedPlan) {
+        showToast('已确认的方案不可调整，请先取消确认', 'warning');
+        return;
+    }
+
+    const merchant = getMerchant(plan.merchantId);
+    const fromStall = getStall(plan.fromStallId);
+    const type = ABNORMAL_TYPES[plan.abnormalType];
+
+    $('adjMerchant').value = merchant ? merchant.name : '';
+    $('adjFromStall').value = fromStall ? `${fromStall.id} (${fromStall.zone})` : '';
+    $('adjAbnType').value = type ? type.label : '摊位不可用';
+
+    const usedStallIds = new Set(
+        state.preschedule.relocationPlan
+            .filter(p => p.id !== planId && !p.noStall)
+            .map(p => p.toStallId)
+    );
+    const fromStallIds = new Set(
+        state.preschedule.relocationPlan
+            .filter(p => !p.noStall)
+            .map(p => p.fromStallId)
+    );
+    const candidates = getAvailableStallsForPlan(fromStallIds, usedStallIds);
+
+    if (candidates.length === 0) {
+        candidates.push(...state.stalls.filter(s => 
+            !state.preschedule.unavailableStalls.some(u => u.stallId === s.id)
+        ));
+    }
+
+    const toStallSel = $('adjToStall');
+    toStallSel.innerHTML = candidates.map(s => {
+        const m = getMerchant(s.merchantId);
+        return `<option value="${s.id}">${s.id} (${s.zone})${m ? ' - ' + m.name : ' - 空闲'}</option>`;
+    }).join('');
+    if (plan.toStallId) toStallSel.value = plan.toStallId;
+
+    $('adjReason').value = '';
+
+    openModal('adjustPlanModal');
+}
+
+function submitAdjust() {
+    if (!adjustingPlanId) return;
+    const plan = state.preschedule.relocationPlan.find(p => p.id === adjustingPlanId);
+    if (!plan) return;
+
+    const toStallId = $('adjToStall').value;
+    const manualReason = $('adjReason').value.trim();
+
+    if (!toStallId) {
+        showToast('请选择目标摊位', 'error');
+        return;
+    }
+
+    const merchant = getMerchant(plan.merchantId);
+    const fromStall = getStall(plan.fromStallId);
+    const toStall = getStall(toStallId);
+    const toMerchant = toStall && toStall.merchantId ? getMerchant(toStall.merchantId) : null;
+
+    plan.toStallId = toStallId;
+    plan.toStallZone = toStall ? toStall.zone : null;
+    plan.toMerchantId = toMerchant ? toMerchant.id : null;
+    plan.toMerchantName = toMerchant ? toMerchant.name : null;
+    plan.isManual = true;
+
+    const baseReasons = [];
+    if (toStall && fromStall && toStall.zone === fromStall.zone) baseReasons.push('同区域不跨区');
+    if (toStall && merchant && toStall.power === merchant.power) baseReasons.push(`${getPowerLabel(merchant.power)}需求匹配`);
+    if (!toMerchant) baseReasons.push('空摊位无需换位');
+
+    plan.reason = '📝 运营手动调整' + (manualReason ? `：${manualReason}` : '') +
+        (baseReasons.length ? ` | ${baseReasons.join('；')}` : '');
+    plan.reasons = baseReasons;
+    plan.score = null;
+    plan.noStall = false;
+
+    savePreschedule();
+    closeModal('adjustPlanModal');
+    adjustingPlanId = null;
+    renderPrescheduleAll();
+    showToast('方案已调整', 'success');
+}
+
+function removePlanItem(planId) {
+    if (state.preschedule.confirmedPlan) {
+        showToast('已确认的方案不可修改，请先取消确认', 'warning');
+        return;
+    }
+    showConfirm('删除确认', '确定要删除这条安置方案吗？', () => {
+        state.preschedule.relocationPlan = state.preschedule.relocationPlan.filter(p => p.id !== planId);
+        savePreschedule();
+        renderPrescheduleAll();
+        showToast('方案已删除', 'info');
+    });
+}
+
+function confirmWholePlan() {
+    const validPlan = state.preschedule.relocationPlan.filter(p => !p.noStall);
+    if (validPlan.length === 0) {
+        showToast('没有可确认的有效方案', 'warning');
+        return;
+    }
+    const noStallCount = state.preschedule.relocationPlan.filter(p => p.noStall).length;
+    if (noStallCount > 0) {
+        showToast(`还有 ${noStallCount} 位商户暂无可安置摊位，请先处理`, 'warning');
+        return;
+    }
+
+    const involvedMerchantIds = new Set();
+    const conflicts = [];
+    validPlan.forEach(p => {
+        if (involvedMerchantIds.has(p.merchantId)) {
+            conflicts.push(`${p.merchantName} 被多次安排`);
+        }
+        involvedMerchantIds.add(p.merchantId);
+        if (p.toMerchantId) {
+            if (involvedMerchantIds.has(p.toMerchantId)) {
+                conflicts.push(`${p.toMerchantName} 被多次涉及`);
+            }
+            involvedMerchantIds.add(p.toMerchantId);
+        }
+    });
+    if (conflicts.length > 0) {
+        showToast('方案存在冲突：' + conflicts.join('；'), 'error');
+        return;
+    }
+
+    showConfirm('确认方案', 
+        `确认以下安置方案？\n\n${validPlan.map(p => 
+            `• ${p.merchantName} ${p.fromStallId} → ${p.toStallId}`
+        ).join('\n')}\n\n确认后可一键转为正式安排。`,
+        () => {
+            state.preschedule.confirmedPlan = {
+                id: 'CONF' + Date.now(),
+                items: JSON.parse(JSON.stringify(validPlan)),
+                createdAt: Date.now()
+            };
+            savePreschedule();
+            renderPrescheduleAll();
+            showToast('方案已确认！现在可一键转为正式安排', 'success');
+        }
+    );
+}
+
+function cancelConfirmedPlan() {
+    if (!state.preschedule.confirmedPlan) return;
+    showConfirm('取消确认', '确定要取消已确认的方案吗？', () => {
+        state.preschedule.confirmedPlan = null;
+        savePreschedule();
+        renderPrescheduleAll();
+        showToast('已取消方案确认', 'info');
+    });
+}
+
+function renderConfirmedPlan() {
+    const list = $('confirmedList');
+    const section = $('confirmedSection');
+    const actions = $('confirmedActions');
+    const statusEl = $('confirmedStatus');
+    const plan = state.preschedule.confirmedPlan;
+
+    if (!plan) {
+        statusEl.textContent = '未确认';
+        statusEl.className = 'badge badge-success';
+        section.style.display = '';
+        list.innerHTML = '';
+        actions.style.display = 'none';
+        return;
+    }
+
+    statusEl.textContent = `已确认 (${plan.items.length}项)`;
+    statusEl.className = 'badge badge-success';
+    section.style.display = 'none';
+    actions.style.display = 'flex';
+
+    list.innerHTML = plan.items.map((p, idx) => {
+        const toMerchantText = p.toMerchantName ? `(原商户${p.toMerchantName}互换)` : '(空摊位直接入驻)';
+        return `
+            <div class="confirmed-item ${p.isManual ? 'manual' : ''}">
+                <div class="conf-header">
+                    <span class="conf-merchant">${idx + 1}. ${p.merchantName}</span>
+                    <span class="conf-method ${p.isManual ? 'manual' : 'auto'}">${p.isManual ? '📝 手动调整' : '🤖 智能推荐'}</span>
+                </div>
+                <div class="conf-route">📍 ${p.fromStallId}(${p.fromStallZone}) → ${p.toStallId}(${p.toStallZone}) ${toMerchantText}</div>
+                <div class="conf-reason">${p.reason}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function applyConfirmedPlan() {
+    if (!state.preschedule.confirmedPlan) return;
+    const plan = state.preschedule.confirmedPlan;
+
+    showConfirm('转为正式安排', 
+        `将执行以下 ${plan.items.length} 项安置：\n\n${plan.items.map(p => 
+            `• ${p.merchantName} ${p.fromStallId} → ${p.toStallId}`
+        ).join('\n')}\n\n此操作将写入正式摊位布局和换位历史，可在撤销窗口内撤回。`,
+        () => {
+            const now = Date.now();
+            const swaps = [];
+
+            const fromStallIsBadSet = new Set();
+            const unavStallIds = state.preschedule.unavailableStalls.map(u => u.stallId);
+            unavStallIds.forEach(id => fromStallIsBadSet.add(id));
+            state.preschedule.abnormalMerchants.forEach(a => {
+                const m = getMerchant(a.merchantId);
+                if (m && m.currentStallId) fromStallIsBadSet.add(m.currentStallId);
+            });
+
+            plan.items.forEach(p => {
+                const merchantA = getMerchant(p.merchantId);
+                const stallA = getStall(p.fromStallId);
+                const stallB = getStall(p.toStallId);
+                if (!merchantA || !stallA || !stallB) return;
+
+                let merchantB = null;
+                if (p.toMerchantId) {
+                    merchantB = getMerchant(p.toMerchantId);
+                }
+
+                merchantA.currentStallId = stallB.id;
+                stallB.merchantId = merchantA.id;
+                stallB.category = merchantA.category;
+                stallB.power = merchantA.power;
+
+                if (merchantB) {
+                    if (fromStallIsBadSet.has(stallA.id)) {
+                        const msg = `方案冲突：商户${merchantB.name}将被换到问题摊位${stallA.id}，请重新生成方案或手动调整`;
+                        showToast(msg, 'error');
+                        throw new Error(msg);
+                    }
+                    merchantB.currentStallId = stallA.id;
+                    stallA.merchantId = merchantB.id;
+                    stallA.category = merchantB.category;
+                    stallA.power = merchantB.power;
+                } else {
+                    stallA.merchantId = null;
+                    stallA.category = stallA.category || '';
+                }
+
+                if (stallA.status !== 'idle') stallA.status = 'idle';
+                if (stallB.status !== 'idle') stallB.status = 'idle';
+
+                swaps.push({
+                    id: 'H' + now + '_' + swaps.length,
+                    type: 'swap',
+                    status: 'success',
+                    merchantAId: merchantA.id,
+                    merchantBId: merchantB ? merchantB.id : null,
+                    stallAFrom: stallA.id,
+                    stallBFrom: stallB.id,
+                    stallATo: stallB.id,
+                    stallBTo: stallA.id,
+                    reason: `【开场预排】触发原因：${p.triggerReason} | 安置说明：${p.reason}`,
+                    priority: 3,
+                    createdAt: now - (plan.items.length - swaps.length) * 1000,
+                    completedAt: now,
+                    canUndo: swaps.length === plan.items.length - 1,
+                    fromPreschedule: true,
+                    prescheduleId: plan.id
+                });
+            });
+
+            swaps.forEach(s => state.history.push(s));
+            state.lastUndoableId = swaps.length > 0 ? swaps[swaps.length - 1].id : null;
+
+            const prescheduleHist = {
+                id: 'H_PRE' + now,
+                type: 'preschedule',
+                status: 'applied',
+                summary: `开场预排共执行 ${swaps.length} 项安置`,
+                items: plan.items,
+                createdAt: now,
+                completedAt: now
+            };
+            state.history.push(prescheduleHist);
+
+            state.stalls.forEach(s => {
+                const hasActiveApp = state.applications.some(a =>
+                    (a.status === 'queued' || a.status === 'negotiating') &&
+                    (a.fromStallId === s.id || a.toStallId === s.id)
+                );
+                const hasNego = state.negotiations.some(n =>
+                    n.status === 'active' &&
+                    (n.fromStallId === s.id || n.toStallId === s.id)
+                );
+                if (!hasActiveApp && !hasNego) s.status = 'idle';
+            });
+
+            state.preschedule = {
+                abnormalMerchants: [],
+                unavailableStalls: [],
+                relocationPlan: [],
+                confirmedPlan: null,
+                lastUpdated: now,
+                lastApplied: {
+                    id: plan.id,
+                    at: now,
+                    count: swaps.length
+                }
+            };
+
+            saveState();
+            closeModal('prescheduleModal');
+            renderAll();
+            showToast(`🎉 开场预排已执行！完成 ${swaps.length} 项安置`, 'success', 4000);
+        }
+    );
+}
+
+function renderStalls() {
+    const grid = $('stallsGrid');
+    const fCat = $('filterCategory').value;
+    const fPower = $('filterPower').value;
+    const fPop = parseInt($('filterPopularity').value) || 0;
+
+    let stalls = [...state.stalls];
+    if (fCat) stalls = stalls.filter(s => s.category === fCat);
+    if (fPower) stalls = stalls.filter(s => s.power === fPower);
+    if (fPop) stalls = stalls.filter(s => s.popularity >= fPop);
+
+    if (stalls.length === 0) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column:1/-1">
+                <div class="empty-state-icon">🔍</div>
+                <div class="empty-state-text">没有符合筛选条件的摊位</div>
+            </div>`;
+        return;
+    }
+
+    ensurePreschedule();
+    const unavIds = new Set(state.preschedule.unavailableStalls.map(u => u.stallId));
+    const abnMerchantIds = new Set(state.preschedule.abnormalMerchants.map(a => a.merchantId));
+
+    grid.innerHTML = stalls.map(s => {
+        const merchant = getMerchant(s.merchantId);
+        const isUnavailable = unavIds.has(s.id);
+        const isAbnormal = merchant && abnMerchantIds.has(merchant.id);
+
+        const statusClass = isUnavailable ? 'stall-unavailable'
+            : isAbnormal ? 'stall-abnormal'
+            : s.status === 'negotiating' ? 'stall-negotiating' 
+            : s.status === 'targeted' ? 'stall-targeted'
+            : s.status === 'busy' ? 'stall-busy' : '';
+        
+        let statusTag = '';
+        if (isUnavailable) statusTag = '<div class="stall-status-tag tag-busy" style="background:#ef4444;">🚧 不可用</div>';
+        else if (isAbnormal) {
+            const abn = state.preschedule.abnormalMerchants.find(a => a.merchantId === merchant.id);
+            const type = abn ? ABNORMAL_TYPES[abn.type] : null;
+            const label = type ? type.label : '异常';
+            statusTag = `<div class="stall-status-tag tag-abnormal">⚠️ ${label}</div>`;
+        }
+        else if (s.status === 'negotiating') statusTag = '<div class="stall-status-tag tag-negotiating">协商中</div>';
+        else if (s.status === 'targeted') statusTag = '<div class="stall-status-tag tag-targeted">被申请</div>';
+
+        return `
+            <div class="stall-card ${statusClass}" data-stall="${s.id}">
+                ${statusTag}
+                <div class="stall-header">
+                    <div class="stall-number">${s.id}</div>
+                    <div class="stall-zone">${s.zone}</div>
+                </div>
+                <div class="stall-merchant-name" title="${merchant ? merchant.name : '空闲'}">${merchant ? merchant.name : '— 空闲 —'}</div>
+                <span class="stall-category cat-${s.category}">${s.category}</span>
+                <div class="stall-info-row">
+                    <span class="stall-stars">${getStars(s.popularity)}</span>
+                    <span class="stall-power ${getPowerClass(s.power)}">
+                        <span class="power-dot"></span>${getPowerLabel(s.power)}
+                    </span>
+                </div>
+                <div class="stall-info-row" style="margin-top:6px;color:#94a3b8;font-size:11px">
+                    <span>💡 ${s.note}</span>
+                </div>
+                <div class="stall-actions">
+                    <button class="stall-btn btn-history" data-merchant="${merchant ? merchant.id : ''}" onclick="event.stopPropagation(); viewMerchantHistory('${merchant ? merchant.id : ''}')">商户历史</button>
+                    <button class="stall-btn" onclick="event.stopPropagation(); quickApplyFromStall('${s.id}')">申请换位</button>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function initPrescheduleEventListeners() {
+    $('btnPreschedule').addEventListener('click', openPrescheduleModal);
+    $('btnAddAbnormal').addEventListener('click', () => openAddAbnormalModal(null));
+    $('btnSubmitAbnormal').addEventListener('click', submitAbnormal);
+    $('btnAddUnavailable').addEventListener('click', openAddUnavailableModal);
+    $('btnSubmitUnavailable').addEventListener('click', submitUnavailable);
+    $('btnGeneratePlan').addEventListener('click', generateRelocationPlan);
+    $('btnSubmitAdjust').addEventListener('click', submitAdjust);
+    $('btnCancelConfirm').addEventListener('click', cancelConfirmedPlan);
+    $('btnApplyConfirm').addEventListener('click', applyConfirmedPlan);
+}
+
 function init() {
     if (!loadState()) {
         state = generateInitialState();
         saveState();
     }
+    ensurePreschedule();
     initEventListeners();
+    initPrescheduleEventListeners();
     renderAll();
     startUndoTimerTicker();
     showToast('夜市摊位换位调度台已就绪！', 'success', 2500);

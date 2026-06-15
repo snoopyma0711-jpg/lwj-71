@@ -14,6 +14,7 @@
                 <div class="header-time" id="currentTime"></div>
             </div>
             <div class="header-right">
+                <button class="btn btn-primary" id="btnPreschedule">📋 今晚开场前预排</button>
                 <button class="btn btn-primary" id="btnNewApplication">➕ 发起换位申请</button>
                 <button class="btn btn-warning" id="btnUndoSwap" disabled>↩️ 撤销上一笔换位</button>
                 <button class="btn btn-ghost" id="btnResetData">🔄 重置数据</button>
@@ -230,6 +231,175 @@
             <div class="modal-footer">
                 <button class="btn btn-ghost" id="btnConfirmCancel">取消</button>
                 <button class="btn btn-primary" id="btnConfirmOk">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="prescheduleModal" style="display:none;">
+        <div class="modal modal-preschedule">
+            <div class="modal-header">
+                <h3>📋 今晚开场前预排</h3>
+                <button class="modal-close" data-close="prescheduleModal">✕</button>
+            </div>
+            <div class="modal-body preschedule-body">
+                <div class="preschedule-columns">
+                    <div class="preschedule-col">
+                        <div class="preschedule-panel">
+                            <div class="panel-header">
+                                <h4>⚠️ 今晚异常商户</h4>
+                                <span class="badge badge-warning" id="abnormalCount">0</span>
+                            </div>
+                            <div class="panel-actions">
+                                <button class="btn btn-sm btn-primary" id="btnAddAbnormal">+ 添加异常</button>
+                            </div>
+                            <div class="preschedule-list" id="abnormalList"></div>
+                        </div>
+                        <div class="preschedule-panel">
+                            <div class="panel-header">
+                                <h4>🚧 不可用摊位</h4>
+                                <span class="badge badge-danger" id="unavailableCount">0</span>
+                            </div>
+                            <div class="panel-actions">
+                                <button class="btn btn-sm btn-danger" id="btnAddUnavailable">+ 标记摊位</button>
+                            </div>
+                            <div class="preschedule-list" id="unavailableList"></div>
+                        </div>
+                    </div>
+
+                    <div class="preschedule-col">
+                        <div class="preschedule-panel">
+                            <div class="panel-header">
+                                <h4>🔄 候补安置方案</h4>
+                                <div style="display:flex;gap:6px;">
+                                    <button class="btn btn-sm btn-info" id="btnGeneratePlan">🧠 智能生成方案</button>
+                                    <span class="badge badge-info" id="planCount">0</span>
+                                </div>
+                            </div>
+                            <div class="panel-hint" id="planHint">录入异常商户和不可用摊位后，点击"智能生成方案"获取推荐</div>
+                            <div class="preschedule-list" id="planList"></div>
+                        </div>
+                        <div class="preschedule-panel">
+                            <div class="panel-header">
+                                <h4>✅ 已确认的预排结果</h4>
+                                <span class="badge badge-success" id="confirmedStatus">未确认</span>
+                            </div>
+                            <div id="confirmedSection">
+                                <div class="panel-hint">确认方案后将在此显示结果，并可一键转为正式安排</div>
+                            </div>
+                            <div class="preschedule-list" id="confirmedList"></div>
+                            <div class="confirmed-actions" id="confirmedActions" style="display:none;">
+                                <button class="btn btn-danger" id="btnCancelConfirm">↩️ 取消确认</button>
+                                <button class="btn btn-success" id="btnApplyConfirm">🚀 一键转为正式安排</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div style="flex:1;color:#64748b;font-size:12px;">💡 数据自动保存，刷新页面不丢失</div>
+                <button class="btn btn-ghost" data-close="prescheduleModal">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="addAbnormalModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3 id="addAbnormalTitle">➕ 添加异常商户</h3>
+                <button class="modal-close" data-close="addAbnormalModal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>商户 <span class="required">*</span></label>
+                    <select id="abnMerchant"></select>
+                </div>
+                <div class="form-group">
+                    <label>异常类型 <span class="required">*</span></label>
+                    <select id="abnType">
+                        <option value="late">⏰ 晚到（需安排候补）</option>
+                        <option value="leave">📝 请假（需安排候补）</option>
+                        <option value="blackout">⚡ 临时停电（需安排候补）</option>
+                        <option value="closed">🚫 暂时不开摊</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>备注说明</label>
+                    <textarea id="abnRemark" rows="2" placeholder="可选：具体原因、预计到店时间等..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="addAbnormalModal">取消</button>
+                <button class="btn btn-primary" id="btnSubmitAbnormal">确认添加</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="addUnavailableModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3>🚧 标记不可用摊位</h3>
+                <button class="modal-close" data-close="addUnavailableModal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>摊位 <span class="required">*</span></label>
+                    <select id="unavStall"></select>
+                </div>
+                <div class="form-group">
+                    <label>不可用原因 <span class="required">*</span></label>
+                    <select id="unavReason">
+                        <option value="设施维修">🔧 设施维修</option>
+                        <option value="卫生清理">🧹 卫生清理</option>
+                        <option value="电路检修">⚡ 电路检修</option>
+                        <option value="临时征用">📦 临时征用</option>
+                        <option value="其他">📝 其他原因</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>备注说明</label>
+                    <textarea id="unavRemark" rows="2" placeholder="可选：具体情况说明..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="addUnavailableModal">取消</button>
+                <button class="btn btn-danger" id="btnSubmitUnavailable">确认标记</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="adjustPlanModal" style="display:none;">
+        <div class="modal modal-sm">
+            <div class="modal-header">
+                <h3>🔧 调整安置方案</h3>
+                <button class="modal-close" data-close="adjustPlanModal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>需安置商户</label>
+                    <input type="text" id="adjMerchant" disabled>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>原摊位</label>
+                        <input type="text" id="adjFromStall" disabled>
+                    </div>
+                    <div class="form-group">
+                        <label>原异常</label>
+                        <input type="text" id="adjAbnType" disabled>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>调整至摊位 <span class="required">*</span></label>
+                    <select id="adjToStall"></select>
+                </div>
+                <div class="form-group">
+                    <label>调整原因</label>
+                    <textarea id="adjReason" rows="2" placeholder="手动调整的说明..."></textarea>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost" data-close="adjustPlanModal">取消</button>
+                <button class="btn btn-primary" id="btnSubmitAdjust">确认调整</button>
             </div>
         </div>
     </div>
